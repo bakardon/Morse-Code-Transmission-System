@@ -1,0 +1,203 @@
+`timescale 1ns / 1ps
+// MAIN CODE
+module MorseCodeSystem (
+    input wire clk,           // 100MHz clock
+    input wire btn_rst,       // BTNC (Reset)
+    input wire btn_store,     // BTNL (Store)
+    input wire btn_start_seq, // BTNR (Start)
+    input wire mode_sw,       // SW15 (Mode)
+    input wire [3:0] sw_input,// SW0-SW3 (Input)
+    output reg led_out,       // LD0 (Morse LED)
+    output wire [6:0] seg,    // 7-segment cathodes (CA-CG)
+    output wire [7:0] an      // 7-segment anodes (AN0-AN7)
+);
+
+    // --- Timing Parameters ---
+    `ifdef SIMULATION
+        localparam UNIT = 10; 
+    `else
+        localparam UNIT = 25_000_000; // 0.25s @ 100MHz for Hardware
+    `endif
+
+    localparam ONE_SEC   = UNIT;
+    localparam THREE_SEC = UNIT * 3;
+    localparam HALF_SEC  = UNIT / 2;
+    localparam TWO_SEC   = UNIT * 2;
+
+    // --- FSM States ---
+    localparam IDLE         = 3'd0;
+    localparam FETCH_DIGIT  = 3'd1;
+    localparam LOAD_PATTERN = 3'd2;
+    localparam SEND_ELEMENT = 3'd3;
+    localparam ELEMENT_GAP  = 3'd4;
+    localparam DIGIT_GAP    = 3'd5;
+    localparam DONE         = 3'd6;
+
+    reg [2:0] state;
+
+    // --- Internal Registers ---
+    reg [3:0] fifo [0:5];      
+    reg [2:0] write_ptr, read_ptr, current_count;
+    reg [31:0] timer, target_time;
+    reg [14:0] current_pattern;
+    reg [2:0]  element_idx;
+    reg [3:0]  active_digit;
+    reg [3:0]  display_digit; 
+
+    // --- Edge Detection / Debounce ---
+    reg [19:0] db_cnt;
+    reg db_store, db_start;
+    reg store_reg, start_reg;
+    
+    always @(posedge clk) begin
+        db_cnt <= db_cnt + 1;
+        if (db_cnt == 0) begin
+            db_store <= btn_store;
+            db_start <= btn_start_seq;
+        end
+        store_reg <= db_store;
+        start_reg <= db_start;
+    end
+    
+    wire store_pulse = (db_store && !store_reg);
+    wire start_pulse = (db_start && !start_reg);
+
+    // --- Morse Look-up Table ---
+    // ERROR 1 FIXED: Changed '~=' to '='. (~= is invalid syntax)
+    function [14:0] get_morse(input [3:0] d);
+        case(d)
+            4'd0: get_morse = 15'b010_010_010_010_010; 
+            4'd1: get_morse = 15'b001_010_010_010_010; 
+            4'd2: get_morse = 15'b001_001_010_010_010; 
+            4'd3: get_morse = 15'b001_001_001_010_010; 
+            4'd4: get_morse = 15'b001_001_001_001_010; 
+            4'd5: get_morse = 15'b001_001_001_001_001; 
+            4'd6: get_morse = 15'b010_001_001_001_001; 
+            4'd7: get_morse = 15'b010_010_001_001_001; 
+            4'd8: get_morse = 15'b010_010_010_001_001; 
+            4'd9: get_morse = 15'b010_010_010_010_001; 
+            default: get_morse = 15'b000_000_000_000_000;
+        endcase
+    endfunction
+
+    // --- Main Control Logic ---
+    always @(posedge clk) begin
+        if (btn_rst) begin 
+            state <= IDLE;
+            write_ptr <= 0; read_ptr <= 0; current_count <= 0;
+            led_out <= 0; timer <= 0;
+            display_digit <= 0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    led_out <= 0; timer <= 0; element_idx <= 0;
+                    display_digit <= sw_input; 
+                    
+                    if (!mode_sw && store_pulse) begin
+                        active_digit <= sw_input;
+                        current_count <= 1;
+                        state <= LOAD_PATTERN;
+                    end
+                    else if (mode_sw && store_pulse && current_count < 6) begin
+                        fifo[write_ptr] <= sw_input;
+                        write_ptr <= write_ptr + 1;
+                        current_count <= current_count + 1;
+                    end
+                    else if (mode_sw && start_pulse && current_count > 0) begin
+                        read_ptr <= 0;
+                        state <= FETCH_DIGIT;
+                    end
+                end
+
+                FETCH_DIGIT: begin
+                    active_digit <= fifo[read_ptr];
+                    element_idx <= 0;
+                    state <= LOAD_PATTERN;
+                end
+
+                LOAD_PATTERN: begin
+                    display_digit <= active_digit; 
+                    current_pattern <= get_morse(active_digit);
+                    state <= SEND_ELEMENT;
+                end
+
+                SEND_ELEMENT: begin
+                    // ERROR 2 FIXED: Changed logic to read from Bit 12 down.
+                    // (12 - idx*3) ensures we read Left-to-Right (MSB first).
+                    target_time <= (current_pattern[(12 - (element_idx*3)) +: 3] == 3'b001) ? ONE_SEC : THREE_SEC;
+                    led_out <= 1;
+                    if (timer < target_time) timer <= timer + 1;
+                    else begin
+                        timer <= 0; led_out <= 0;
+                        state <= ELEMENT_GAP;
+                    end
+                end
+
+                ELEMENT_GAP: begin
+                    if (timer < HALF_SEC) timer <= timer + 1;
+                    else begin
+                        timer <= 0;
+                        if (element_idx < 4) begin
+                            element_idx <= element_idx + 1;
+                            state <= SEND_ELEMENT;
+                        end else begin
+                            if (mode_sw && (read_ptr + 1 < current_count)) state <= DIGIT_GAP;
+                            else state <= DONE;
+                        end
+                    end
+                end
+
+                DIGIT_GAP: begin
+                    if (timer < TWO_SEC) timer <= timer + 1;
+                    else begin
+                        timer <= 0;
+                        read_ptr <= read_ptr + 1;
+                        state <= FETCH_DIGIT;
+                    end
+                end
+
+                DONE: begin
+                    write_ptr <= 0; current_count <= 0;
+                    state <= IDLE;
+                end
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+    // --- Instantiate 7-Segment Driver ---
+    SevenSegmentDriver display_driver (
+        .clk(clk),
+        .digit_in(display_digit),
+        .seg(seg),
+        .an(an)
+    );
+
+endmodule
+
+
+// --- 7-Segment Driver Module ---
+module SevenSegmentDriver(
+    input wire clk,
+    input wire [3:0] digit_in,
+    output reg [6:0] seg,
+    output reg [7:0] an
+);
+    always @(posedge clk) begin
+        an <= 8'b11111110; 
+        
+        case(digit_in)
+            4'd0: seg <= 7'b1000000; 
+            4'd1: seg <= 7'b1111001; 
+            4'd2: seg <= 7'b0100100; 
+            4'd3: seg <= 7'b0110000; 
+            4'd4: seg <= 7'b0011001; 
+            4'd5: seg <= 7'b0010010; 
+            4'd6: seg <= 7'b0000010; 
+            4'd7: seg <= 7'b1111000; 
+            4'd8: seg <= 7'b0000000; 
+            4'd9: seg <= 7'b0010000; 
+            default: seg <= 7'b1111111; 
+        endcase
+    end
+endmodule

@@ -1,0 +1,82 @@
+`timescale 1ns / 1ps
+
+
+// Trigger fast simulation timers
+`define SIMULATION 
+
+module tb_MorseCode();
+    // Inputs
+    reg clk;
+    reg btn_rst;
+    reg btn_store;
+    reg btn_start_seq;
+    reg mode_sw;
+    reg [3:0] sw_input;
+
+    // Outputs
+    wire led_out;
+    wire [6:0] seg;
+    wire [7:0] an;
+
+    // Instantiate the UUT
+    MorseCodeSystem uut (
+        .clk(clk), 
+        .btn_rst(btn_rst), 
+        .btn_store(btn_store), 
+        .btn_start_seq(btn_start_seq), 
+        .mode_sw(mode_sw), 
+        .sw_input(sw_input), 
+        .led_out(led_out),
+        .seg(seg),
+        .an(an)
+    );
+
+    // Generate 100MHz Clock
+    always #5 clk = ~clk;
+
+    initial begin
+        // Initialize
+        clk = 0;
+        btn_rst = 1; 
+        btn_store = 0;
+        btn_start_seq = 0;
+        mode_sw = 0;
+        sw_input = 4'd2; // Input '2'
+
+        // Reset Sequence
+        #100;
+        btn_rst = 0;
+        
+        // Test Direct Mode (Single Digit)
+        #50;
+        btn_store = 1; // Press
+        #500;          // Hold longer for debounce check
+        btn_store = 0; // Release
+
+        // Wait for Morse code to finish
+        // (Since UNIT=10 in simulation, this happens quickly)
+        #2000;
+        
+        // Test FIFO Mode
+        mode_sw = 1;
+        sw_input = 4'd5; // First digit '5'
+        #50;
+        btn_store = 1;
+        #500;
+        btn_store = 0;
+        
+        #500;
+        sw_input = 4'd9; // Second digit '9'
+        btn_store = 1;
+        #500;
+        btn_store = 0;
+        
+        #500;
+        btn_start_seq = 1; // Start Sequence
+        #500;
+        btn_start_seq = 0;
+
+        #5000;
+        $finish;
+    end
+endmodule
